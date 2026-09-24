@@ -10,7 +10,7 @@ app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "Velsci Fit Fast Local Engine Operational"}), 200
+    return jsonify({"status": "Velsci Fit Precision Engine Operational"}), 200
 
 @app.route('/process-pattern', methods=['POST'])
 def process_pattern():
@@ -34,34 +34,52 @@ def process_pattern():
 
         h_img, w_img, _ = img.shape
 
-        # Fast Image Contour Extraction (Lightweight Processing)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Adaptive Threshold
-        thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        # 1. Focus ROI on Central Region to eliminate outer table noise/bottom furniture
+        roi_y1, roi_y2 = int(h_img * 0.15), int(h_img * 0.85)
+        roi_x1, roi_x2 = int(w_img * 0.10), int(w_img * 0.90)
+        roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
 
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 2. Advanced HSV Color & Contrast Masking
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        
+        # Blur & Threshold to ignore floral/leaf background
+        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3)
+
+        # Morphology to remove thin lines (leaf patterns)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if contours:
-            garment_contour = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(garment_contour)
+            c = max(contours, key=cv2.contourArea)
+            rx, ry, rw, rh = cv2.boundingRect(c)
+            # Map back to full image coordinates
+            x, y, w, h = rx + roi_x1, ry + roi_y1, rw, rh
+            garment_contour = c + np.array([roi_x1, roi_y1])
         else:
-            x, y, w, h = int(w_img * 0.1), int(h_img * 0.1), int(w_img * 0.8), int(h_img * 0.8)
+            # Safe Default Box around the t-shirt
+            x, y, w, h = int(w_img * 0.15), int(h_img * 0.20), int(w_img * 0.70), int(h_img * 0.65)
+            garment_contour = None
 
-        # Measurements Calculation
+        # Scaling & Measurements
         pixel_to_mm_ratio = (h / 650.0) if h > 0 else 1.0
         real_width_cm = round((w / pixel_to_mm_ratio) / 10.0, 1)
         real_height_cm = round((h / pixel_to_mm_ratio) / 10.0, 1)
         total_height_cm = round(real_height_cm * (1 + margin_percent), 1)
         required_meters = round(total_height_cm / 100.0, 2)
 
-        # Fast Output Drawing
+        # Draw Output
         output_img = img.copy()
-        if contours:
-            cv2.drawContours(output_img, [garment_contour], -1, (0, 255, 0), 4)
+        if garment_contour is not None:
+            cv2.drawContours(output_img, [garment_contour], -1, (0, 255, 0), 3)
+        
+        # Red Box over exact Garment Area
         cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 0, 255), 3)
 
+        # Draw Puzzle Grid inside the T-Shirt Box
         cell_w = max(w // grid_cols, 1)
         cell_h = max(h // grid_rows, 1)
         piece_num = 1
@@ -77,7 +95,7 @@ def process_pattern():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 piece_num += 1
 
-        _, buffer = cv2.imencode('.jpg', output_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        _, buffer = cv2.imencode('.jpg', output_img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         processed_base64 = "data:image/jpeg;base64," + base64.b64encode(buffer).decode('utf-8')
 
         return jsonify({
@@ -90,7 +108,7 @@ def process_pattern():
         }), 200
 
     except Exception as e:
-        return jsonify({"error": "Fast Engine Recovery Triggered"}), 200
+        return jsonify({"error": "Error in pattern bounding"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
