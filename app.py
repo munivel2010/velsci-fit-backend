@@ -10,51 +10,39 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024  # 15MB Limit
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "Velsci Fit AI & Claude Engine Operational"}), 200
+    return jsonify({"status": "Velsci Fit Free AI & OpenCV Engine Operational"}), 200
 
-def analyze_garment_with_claude(base64_image):
+def analyze_with_free_gemini(base64_image):
     """
-    Calls Anthropic Claude 3.5 Sonnet Vision API to extract keypoints & garment structure.
+    Uses Google Gemini 1.5 Flash Free API for Zero-Cost Vision Keypoint Scanning.
     """
-    if not ANTHROPIC_API_KEY:
-        return None  # Fallback to local CV if no key provided
+    if not GEMINI_API_KEY:
+        return None
 
     try:
-        headers = {
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "json"
-        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
-            "model": "claude-3-5-sonnet-20241022",
-            "max_tokens": 300,
-            "messages": [{
-                "role": "user",
-                "content": [
+            "contents": [{
+                "parts": [
+                    {"text": "Analyze this garment image and return estimated bounding box percentages [top, left, width, height]."},
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
                             "data": base64_image
                         }
-                    },
-                    {
-                        "type": "text",
-                        "text": "Identify the garment boundary coordinates in percentages (top, left, width, height) and reference object if present."
                     }
                 ]
             }]
         }
-        res = requests.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers, timeout=5)
+        res = requests.post(url, json=payload, timeout=5)
         if res.status_code == 200:
             return res.json()
     except Exception as e:
-        print("Claude API Error:", e)
+        print("Free Gemini API Error:", e)
     return None
 
 @app.route('/process-pattern', methods=['POST'])
@@ -72,10 +60,10 @@ def process_pattern():
 
         raw_base64 = image_data.split(',')[1] if ',' in image_data else image_data
 
-        # 1. AI Vision Layer (Claude Processing)
-        claude_analysis = analyze_garment_with_claude(raw_base64)
+        # 1. Free AI Processing Layer (Google Gemini)
+        gemini_result = analyze_with_free_gemini(raw_base64)
 
-        # 2. Local OpenCV Image Processing
+        # 2. Local OpenCV Advanced Processing (100% Free)
         decoded_bytes = base64.b64decode(raw_base64)
         nparr = np.frombuffer(decoded_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -85,7 +73,7 @@ def process_pattern():
 
         h_img, w_img, _ = img.shape
 
-        # Contour Segmentation
+        # Preprocessing & Morphological Filtering
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (7, 7), 0)
         thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
@@ -98,17 +86,17 @@ def process_pattern():
             garment_contour = max(contours, key=cv2.contourArea)
             x, y, w, h = cv2.boundingRect(garment_contour)
         else:
-            # Fallback Bounding Box
+            # Fallback Box if Image is too dark or blurry
             x, y, w, h = int(w_img * 0.15), int(h_img * 0.10), int(w_img * 0.70), int(h_img * 0.80)
 
-        # Dimension Scaling
+        # Dimension Scaling Calculation
         pixel_to_mm_ratio = (h / 650.0)
         real_width_cm = round((w / pixel_to_mm_ratio) / 10.0, 1)
         real_height_cm = round((h / pixel_to_mm_ratio) / 10.0, 1)
         total_height_cm = round(real_height_cm * (1 + margin_percent), 1)
         required_meters = round(total_height_cm / 100.0, 2)
 
-        # Draw Output Pattern Grid
+        # Drawing Pattern & Puzzle Grid
         output_img = img.copy()
         if contours:
             cv2.drawContours(output_img, [garment_contour], -1, (0, 255, 0), 4)
@@ -138,7 +126,7 @@ def process_pattern():
 
         return jsonify({
             "success": True,
-            "claude_integrated": True if claude_analysis else False,
+            "engine": "Free Gemini + OpenCV Local Engine",
             "measured_width_cm": real_width_cm,
             "measured_height_cm": real_height_cm,
             "required_meters": required_meters,
@@ -147,7 +135,7 @@ def process_pattern():
         }), 200
 
     except Exception as e:
-        return jsonify({"error": "Processing error occurred"}), 500
+        return jsonify({"error": "Error processing pattern"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
