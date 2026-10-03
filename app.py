@@ -4,6 +4,9 @@ import cv2
 import numpy as np
 import base64
 import math
+import os
+import json
+import openai
 
 app = FastAPI(
     title="Velsci AI Parametric Pattern Generator API",
@@ -11,7 +14,7 @@ app = FastAPI(
     description="Production-ready hybrid pattern engine combining computer vision style extraction with Six Sigma validated parametric measurement inputs."
 )
 
-# Enable CORS for GitHub Pages (velsci.com)
+# Enable CORS for GitHub Pages (velsci.com)[cite: 9]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Production setting: replace with ["https://velsci.com"]
@@ -19,6 +22,43 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize OpenAI client if API key is configured
+client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY")) if os.environ.get("OPENAI_API_KEY") else None
+
+def analyze_garment_with_openai(image_bytes: bytes) -> dict:
+    """Uses advanced OpenAI vision model to analyze reference garment photos and return precise styling/ease tweaks."""
+    if not client or not image_bytes:
+        return {"notice": "Standard parametric generation active."}
+    try:
+        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyze this garment photo for custom tailoring pattern generation. "
+                                "Return a JSON object with keys: 'style_name', 'ease_modifier' (float multiplier around 1.0), "
+                                "'collar_depth' (int), and 'tailoring_notes' (string summarizing style details)."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=400
+        ]
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        return {"notice": f"AI analysis fallback: {str(e)}"}
 
 def process_parametric_pattern(
     image_bytes: bytes = None,
@@ -33,12 +73,16 @@ def process_parametric_pattern(
     grid_rows: int = 3,
     grid_cols: int = 2
 ):
-    # 1. Calculate Stretch-Adjusted Dimensions
-    adj_chest = chest_cm * (1.0 - stretch_ratio)
-    adj_waist = waist_cm * (1.0 - stretch_ratio)
-    adj_hips = hips_cm * (1.0 - stretch_ratio)
+    # 1. Run OpenAI Vision Analysis on Uploaded Photo (if available)
+    ai_insights = analyze_garment_with_openai(image_bytes)
+    ease_mod = float(ai_insights.get("ease_modifier", 1.0))
 
-    # 2. Scale Setup (DPI scaling: ~5 pixels per cm for clean web preview rendering)
+    # 2. Calculate Stretch-Adjusted Dimensions with AI Modifier
+    adj_chest = (chest_cm * ease_mod) * (1.0 - stretch_ratio)
+    adj_waist = (waist_cm * ease_mod) * (1.0 - stretch_ratio)
+    adj_hips = (hips_cm * ease_mod) * (1.0 - stretch_ratio)
+
+    # 3. Scale Setup (DPI scaling: ~5 pixels per cm for clean web preview rendering)
     scale = 5.0
     margin_px = int(seam_cm * scale * 2)
     canvas_w = int((shoulder_cm + 20) * scale) + (margin_px * 2)
@@ -47,7 +91,7 @@ def process_parametric_pattern(
     # Create White Canvas
     canvas = np.ones((canvas_h, canvas_w), dtype=np.uint8) * 255
 
-    # 3. Compute Vector Pattern Points (Front Panel Outline)
+    # 4. Compute Vector Pattern Points (Front Panel Outline)
     start_x = canvas_w // 2
     top_y = margin_px + 20
     half_shoulder = int((shoulder_cm * scale) / 2)
@@ -75,7 +119,7 @@ def process_parametric_pattern(
     # Draw Main Garment Contour
     cv2.polylines(canvas, [pts], isClosed=False, color=(0), thickness=2)
 
-    # 4. Draw Seam Allowance (Outer Dashed Boundary)
+    # 5. Draw Seam Allowance (Outer Dashed Boundary)
     seam_offset_px = int(seam_cm * scale)
     seam_pts = pts.copy()
     seam_pts[:5, 0] -= seam_offset_px
@@ -85,7 +129,7 @@ def process_parametric_pattern(
 
     cv2.polylines(canvas, [seam_pts], isClosed=False, color=(120), thickness=1, lineType=cv2.LINE_AA)
 
-    # 5. Overlay Style Extraction from Photo (if provided)
+    # 6. Overlay Style Extraction from Photo (if provided)
     if image_bytes:
         try:
             nparr = np.frombuffer(image_bytes, np.uint8)
@@ -95,14 +139,13 @@ def process_parametric_pattern(
                 blurred = cv2.bilateralFilter(gray_photo, 9, 75, 75)
                 edges = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
                 resized_edges = cv2.resize(edges, (canvas_w // 3, canvas_h // 3))
-                # Embed style preview into corner
                 canvas[10:10+(canvas_h // 3), 10:10+(canvas_w // 3)] = cv2.bitwise_and(
                     canvas[10:10+(canvas_h // 3), 10:10+(canvas_w // 3)], resized_edges
                 )
         except Exception:
-            pass  # Fall back to pure parametric generation if photo fails
+            pass
 
-    # 6. Grid Slicing for A4 Puzzle Printable Tiles
+    # 7. Grid Slicing for A4 Puzzle Printable Tiles
     tile_h, tile_w = canvas_h // grid_rows, canvas_w // grid_cols
     puzzle_tiles = []
 
@@ -112,12 +155,10 @@ def process_parametric_pattern(
             x1, x2 = c * tile_w, (c + 1) * tile_w
             tile = canvas[y1:y2, x1:x2].copy()
 
-            # Registration Alignment Crossmarks on Corners
             csz = 12
             cv2.line(tile, (5, csz), (5 + csz, csz), (150), 1)
             cv2.line(tile, (csz, 5), (csz, 5 + csz), (150), 1)
 
-            # Metadata Tag
             tag = f"Tile [{r+1},{c+1}] | Chest: {chest_cm}cm"
             cv2.putText(tile, tag, (10, tile_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100), 1)
 
@@ -132,7 +173,8 @@ def process_parametric_pattern(
     _, master_buf = cv2.imencode('.png', canvas)
     master_b64 = base64.b64encode(master_buf).decode('utf-8')
 
-    return f"data:image/png;base64,{master_b64}", puzzle_tiles
+    notice_msg = ai_insights.get("tailoring_notes", "Parametric calculation verified. Always test cut on trial fabric.")
+    return f"data:image/png;base64,{master_b64}", puzzle_tiles, notice_msg
 
 
 @app.get("/")
@@ -159,7 +201,7 @@ async def generate_pattern_endpoint(
 ):
     try:
         image_bytes = await file.read() if file else None
-        master_img, tiles = process_parametric_pattern(
+        master_img, tiles, dynamic_notice = process_parametric_pattern(
             image_bytes=image_bytes,
             chest_cm=chest_cm,
             waist_cm=waist_cm,
@@ -174,7 +216,7 @@ async def generate_pattern_endpoint(
         return {
             "status": "success",
             "version": "v3.0-beta",
-            "notice": "Parametric calculation verified. Always test cut on trial fabric.",
+            "notice": dynamic_notice,
             "master_pattern": master_img,
             "puzzle_tiles": tiles
         }
